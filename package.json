@@ -1,0 +1,22 @@
+{
+  "name": "test",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dockerode": "^4.0.2",
+    "express": "^4.21.2",
+    "node-fetch": "^3.3.2",
+    "os-utils": "^0.0.14",
+    "redis": "^4.7.0",
+    "uuid": "^11.0.3",
+    "ws": "^8.18.0"
+  },
+  "type": "module"
+}
