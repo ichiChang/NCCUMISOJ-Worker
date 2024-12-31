@@ -1,23 +1,15 @@
 // agent.js
 import WebSocket from "ws";
 import { v4 as uuidv4 } from 'uuid';
+import Docker from 'dockerode';
 import Runner from './runner.js';
 import { languageConfigs } from "./config/config.js";
 
 class Agent {
-    constructor(wServerUrl, config = {}) {
+    constructor(wServerUrl) {
         this.id = uuidv4();
         this.wServerUrl = wServerUrl;  // 保存 URL 供重連使用
-        this.config = {
-            maxCPU: config.maxCPU || 4,
-            maxMemory: config.maxMemory || 4096
-        };
-
-        // 追蹤資源使用
-        this.resources = {
-            usedCPU: 0,
-            usedMemory: 0
-        };
+        this.docker = new Docker();
 
         // 追蹤執行中的任務
         this.activeTasks = new Map();
@@ -29,6 +21,54 @@ class Agent {
         // 開始首次連接
         this.connect();
     }
+
+    async getDockerStats() {
+        try {
+            // 獲取 Docker 系統信息
+            const info = await this.docker.info();
+            
+            // 獲取所有運行中的容器
+            const containers = await this.docker.listContainers();
+            const containerStats = await Promise.all(
+                containers.map(container => this.docker.getContainer(container.Id).stats({ stream: false }))
+            );
+            
+            let totalCPUUsage = 0;
+            let totalMemoryUsage = 0;
+
+            for (const stats of containerStats) {
+                const cpuDelta = stats.cpu_stats.cpu_usage.total_usage - 
+                                stats.precpu_stats.cpu_usage.total_usage;
+                const systemCpuDelta = stats.cpu_stats.system_cpu_usage - 
+                                     stats.precpu_stats.system_cpu_usage;
+                const numberOfCPUs = stats.cpu_stats.online_cpus;
+                
+                if (systemCpuDelta > 0 && numberOfCPUs > 0) {
+                    const cpuUsage = (cpuDelta / systemCpuDelta) * numberOfCPUs;
+                    totalCPUUsage += cpuUsage;
+                }
+
+                if (stats.memory_stats.usage) {
+                    totalMemoryUsage += stats.memory_stats.usage;
+                }
+            }
+
+            return {
+                total: {
+                    cpu: info.NCPU,
+                    memory: Math.round(info.MemTotal / (1024 * 1024))  // 轉換為 MB
+                },
+                used: {
+                    cpu: parseFloat(totalCPUUsage.toFixed(2)),
+                    memory: Math.round(totalMemoryUsage / (1024 * 1024))  // 轉換為 MB
+                }
+            };
+        } catch (error) {
+            console.error('Error getting Docker stats:', error);
+            throw error;
+        }
+    }
+
     connect() {
         // 避免重複連接
         if (this.ws?.readyState === WebSocket.OPEN || this.isConnecting) {
@@ -53,16 +93,17 @@ class Agent {
             this.scheduleReconnect();
         });
 
-        this.ws.onopen = () => {
+        this.ws.onopen = async () => {
             console.log('Connected to Web Server');
             this.isConnecting = false;
             
             // 連接成功後發送註冊資訊
+            const stats = await this.getDockerStats();
             this.sendMessage({
                 type: 'register',
                 resources: {
-                    cpu: this.config.maxCPU,
-                    memory: this.config.maxMemory
+                    cpu: stats.total.cpu,
+                    memory: stats.total.memory
                 }
             });
         };
@@ -102,21 +143,20 @@ class Agent {
         const langConfig = languageConfigs[task.language];
         const startTime = Date.now();
         
-        // 更新資源使用
-        this.resources.usedCPU += langConfig.cpuLimit;
-        this.resources.usedMemory += langConfig.memoryLimit;
+        // 取得目前資源使用量
+        const preStats = await this.getDockerStats();
         
-        // 開始執行時回報資源使用
+        // 回報資源使用
         this.sendMessage({
             type: 'resourceUpdate',
             metrics: {
                 cpu: {
-                    total: this.config.maxCPU,
-                    used: this.resources.usedCPU
+                    total: preStats.total.cpu,
+                    used: preStats.used.cpu + langConfig.cpuLimit
                 },
                 memory: {
-                    total: this.config.maxMemory,
-                    used: this.resources.usedMemory
+                    total: preStats.total.memory,
+                    used: preStats.used.memory + langConfig.memoryLimit
                 }
             }
         });
@@ -125,11 +165,9 @@ class Agent {
             const runner = new Runner();
             const result = await runner.run(task);
      
-            // 釋放資源
-            this.resources.usedCPU -= langConfig.cpuLimit;
-            this.resources.usedMemory -= langConfig.memoryLimit;
+            // 取得最新的資源使用量
+            const postStats = await this.getDockerStats();
      
-            // 發送結果與釋放後的資源狀態
             this.sendMessage({
                 type: 'taskComplete',
                 taskId: task.id,
@@ -137,16 +175,6 @@ class Agent {
                 metrics: {
                     executionTime: Date.now() - startTime,
                     language: task.language,
-                    resources: {
-                        cpu: {
-                            total: this.config.maxCPU,
-                            used: this.resources.usedCPU
-                        },
-                        memory: {
-                            total: this.config.maxMemory, 
-                            used: this.resources.usedMemory
-                        }
-                    },
                     langConfig: {
                         cpuLimit: langConfig.cpuLimit,
                         memoryLimit: langConfig.memoryLimit,
@@ -158,29 +186,33 @@ class Agent {
                 }
             });
         } catch (error) {
-            // 釋放資源
-            this.resources.usedCPU -= langConfig.cpuLimit;
-            this.resources.usedMemory -= langConfig.memoryLimit;
-     
-            // 發送錯誤與釋放後的資源狀態
+            // 取得最新的資源使用量
+            const errorStats = await this.getDockerStats();
+            
             this.sendMessage({
                 type: 'taskError',
                 taskId: task.id,
                 error: error.message,
-                language: task.language,
-                resources: {
+                language: task.language
+            });
+        } finally {
+            // 取得最終資源使用量並回報
+            const finalStats = await this.getDockerStats();
+            this.sendMessage({
+                type: 'resourceUpdate',
+                metrics: {
                     cpu: {
-                        total: this.config.maxCPU,
-                        used: this.resources.usedCPU
+                        total: finalStats.total.cpu,
+                        used: finalStats.used.cpu
                     },
                     memory: {
-                        total: this.config.maxMemory,
-                        used: this.resources.usedMemory
+                        total: finalStats.total.memory,
+                        used: finalStats.used.memory
                     }
                 }
             });
         }
-     }
+    }
 
     sendMessage(message) {
         if (this.ws.readyState === WebSocket.OPEN) {
@@ -197,15 +229,7 @@ class Agent {
 
 // 啟動 agent
 const WS_URL = process.env.WS_URL || 'ws://localhost:4000';
-console.log('Starting agent with configuration:', {
-    url: WS_URL,
-    cpu: process.env.MAX_CPU || 4,
-    memory: process.env.MAX_MEMORY || 4096
-});
-
-const agent = new Agent(WS_URL, {
-    maxCPU: parseInt(process.env.MAX_CPU) || 4,
-    maxMemory: parseInt(process.env.MAX_MEMORY) || 4096
-});
+console.log('Starting agent with WebSocket URL:', WS_URL);
+const agent = new Agent(WS_URL);
 
 export default Agent;
