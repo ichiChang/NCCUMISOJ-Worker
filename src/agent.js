@@ -99,14 +99,14 @@ class Agent {
     }
 
     async startTask(task) {
-        // 計算所需資源
         const langConfig = languageConfigs[task.language];
+        const startTime = Date.now();
         
         // 更新資源使用
         this.resources.usedCPU += langConfig.cpuLimit;
         this.resources.usedMemory += langConfig.memoryLimit;
         
-        // 回報資源更新
+        // 開始執行時回報資源使用
         this.sendMessage({
             type: 'resourceUpdate',
             metrics: {
@@ -120,16 +120,16 @@ class Agent {
                 }
             }
         });
-
-        // 記錄任務開始時間
-        const startTime = Date.now();
-        const runner = new Runner();
-
+     
         try {
-            // 執行任務
+            const runner = new Runner();
             const result = await runner.run(task);
-
-            // 回報執行結果
+     
+            // 釋放資源
+            this.resources.usedCPU -= langConfig.cpuLimit;
+            this.resources.usedMemory -= langConfig.memoryLimit;
+     
+            // 發送結果與釋放後的資源狀態
             this.sendMessage({
                 type: 'taskComplete',
                 taskId: task.id,
@@ -137,6 +137,16 @@ class Agent {
                 metrics: {
                     executionTime: Date.now() - startTime,
                     language: task.language,
+                    resources: {
+                        cpu: {
+                            total: this.config.maxCPU,
+                            used: this.resources.usedCPU
+                        },
+                        memory: {
+                            total: this.config.maxMemory, 
+                            used: this.resources.usedMemory
+                        }
+                    },
                     langConfig: {
                         cpuLimit: langConfig.cpuLimit,
                         memoryLimit: langConfig.memoryLimit,
@@ -148,22 +158,17 @@ class Agent {
                 }
             });
         } catch (error) {
-            // 回報錯誤
+            // 釋放資源
+            this.resources.usedCPU -= langConfig.cpuLimit;
+            this.resources.usedMemory -= langConfig.memoryLimit;
+     
+            // 發送錯誤與釋放後的資源狀態
             this.sendMessage({
                 type: 'taskError',
                 taskId: task.id,
                 error: error.message,
-                language: task.language
-            });
-        } finally {
-            // 釋放資源
-            this.resources.usedCPU -= langConfig.cpuLimit;
-            this.resources.usedMemory -= langConfig.memoryLimit;
-
-            // 回報資源釋放
-            this.sendMessage({
-                type: 'resourceUpdate',
-                metrics: {
+                language: task.language,
+                resources: {
                     cpu: {
                         total: this.config.maxCPU,
                         used: this.resources.usedCPU
@@ -175,7 +180,7 @@ class Agent {
                 }
             });
         }
-    }
+     }
 
     sendMessage(message) {
         if (this.ws.readyState === WebSocket.OPEN) {
