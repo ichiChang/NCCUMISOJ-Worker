@@ -175,6 +175,16 @@ class Agent {
                 metrics: {
                     executionTime: Date.now() - startTime,
                     language: task.language,
+                    resources: {
+                        cpu: {
+                            total: postStats.total.cpu,
+                            used: postStats.used.cpu
+                        },
+                        memory: {
+                            total: postStats.total.memory,
+                            used: postStats.used.memory
+                        }
+                    },
                     langConfig: {
                         cpuLimit: langConfig.cpuLimit,
                         memoryLimit: langConfig.memoryLimit,
@@ -193,7 +203,17 @@ class Agent {
                 type: 'taskError',
                 taskId: task.id,
                 error: error.message,
-                language: task.language
+                language: task.language,
+                resources: {
+                    cpu: {
+                        total: errorStats.total.cpu,
+                        used: errorStats.used.cpu
+                    },
+                    memory: {
+                        total: errorStats.total.memory,
+                        used: errorStats.used.memory
+                    }
+                }
             });
         } finally {
             // 取得最終資源使用量並回報
