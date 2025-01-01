@@ -119,7 +119,7 @@ class Agent {
     scheduleReconnect() {
         this.isConnecting = false;
         console.log('Scheduling reconnection in 10 seconds...');
-        setTimeout(() => this.connect(), 10000);  // 10 秒後重試
+        setTimeout(() => this.connect(), 1000);  // 1 秒後重試
     }
 
     async handleMessage(event) {
@@ -248,7 +248,7 @@ class Agent {
 }
 
 // 啟動 agent
-const WS_URL = process.env.WS_URL || 'ws://localhost:4000';
+const WS_URL = 'wss://api.nccumisoj.online/ws';
 console.log('Starting agent with WebSocket URL:', WS_URL);
 const agent = new Agent(WS_URL);
 
