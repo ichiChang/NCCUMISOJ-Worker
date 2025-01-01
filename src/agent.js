@@ -4,12 +4,14 @@ import { v4 as uuidv4 } from 'uuid';
 import Docker from 'dockerode';
 import Runner from './runner.js';
 import { languageConfigs } from "./config/config.js";
+import { CloudWatchClient, PutMetricDataCommand } from "@aws-sdk/client-cloudwatch";
 
 class Agent {
     constructor(wServerUrl) {
         this.id = uuidv4();
-        this.wServerUrl = wServerUrl;  // 保存 URL 供重連使用
+        this.wServerUrl = wServerUrl;  
         this.docker = new Docker();
+        this.cloudWatchClient = new CloudWatchClient({ region: "ap-northeast-1" });
 
         // 追蹤執行中的任務
         this.activeTasks = new Map();
@@ -20,6 +22,53 @@ class Agent {
         
         // 開始首次連接
         this.connect();
+
+        // 定期發送 metrics
+        setInterval(() => this.publishMetrics(), 60000);  // 每分鐘發送一次
+    }
+
+    async publishMetrics(stats = null) {
+        try {
+            if (!stats) {
+                stats = await this.getDockerStats();
+            }
+
+            const cpuUtilization = (stats.used.cpu / stats.total.cpu) * 100;
+            const memoryUtilization = (stats.used.memory / stats.total.memory) * 100;
+
+            const command = new PutMetricDataCommand({
+                Namespace: "NCCUMISOJ/Resources",
+                MetricData: [
+                    {
+                        MetricName: "CPUUtilization",
+                        Value: cpuUtilization,
+                        Unit: "Percent",
+                        Dimensions: [
+                            {
+                                Name: "InstanceId",
+                                Value: this.id
+                            }
+                        ]
+                    },
+                    {
+                        MetricName: "MemoryUtilization",
+                        Value: memoryUtilization,
+                        Unit: "Percent",
+                        Dimensions: [
+                            {
+                                Name: "InstanceId",
+                                Value: this.id
+                            }
+                        ]
+                    }
+                ]
+            });
+
+            await this.cloudWatchClient.send(command);
+            console.log("Metrics published - CPU: ", cpuUtilization.toFixed(2), "% Memory: ", memoryUtilization.toFixed(2), "%");
+        } catch (error) {
+            console.error("Error publishing metrics:", error);
+        }
     }
 
     async getDockerStats() {
@@ -158,6 +207,14 @@ class Agent {
                     total: preStats.total.memory,
                     used: preStats.used.memory + langConfig.memoryLimit
                 }
+            }
+        });
+
+        await this.publishMetrics({
+            total: preStats.total,
+            used: {
+                cpu: preStats.used.cpu + langConfig.cpuLimit,
+                memory: preStats.used.memory + langConfig.memoryLimit
             }
         });
      
