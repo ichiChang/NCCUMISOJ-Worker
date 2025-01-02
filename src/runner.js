@@ -47,6 +47,58 @@ class Runner {
             }
         }
     }
+    async compileJava(executionDir, langConfig) {
+        console.log('[Runner] Starting Java compilation');
+        
+        const container = await this.docker.createContainer({
+            Image: langConfig.image,  // 使用 amazoncorretto:21
+            WorkingDir: '/code',
+            Cmd: [...langConfig.compileCommand, 'Solution.java', 'TestRunner.java'],  // 使用配置的編譯命令
+            HostConfig: {
+                Binds: [`${executionDir}:/code`],
+                Memory: langConfig.memoryLimit * 1024 * 1024,
+                NanoCPUs: Math.floor(langConfig.cpuLimit * 1e9),
+                ...config.system.containerDefaults
+            }
+        });
+    
+        try {
+            await container.start();
+            const stream = await container.logs({
+                stdout: true,
+                stderr: true,
+                follow: true
+            });
+    
+            return await new Promise((resolve, reject) => {
+                let output = '';
+                
+                stream.on('data', chunk => {
+                    output += chunk.toString();
+                });
+    
+                container.wait((err, data) => {
+                    if (err) {
+                        console.error('[Runner] Java compilation error:', err);
+                        reject(err);
+                    } else if (data.StatusCode !== 0) {
+                        console.error('[Runner] Java compilation failed:', output);
+                        reject(new Error(`Compilation failed: ${output}`));
+                    } else {
+                        console.log('[Runner] Java compilation successful');
+                        resolve();
+                    }
+                });
+            });
+        } finally {
+            try {
+                await container.stop().catch(() => {});
+                await container.remove().catch(() => {});
+            } catch (e) {
+                console.error('[Runner] Cleanup error:', e);
+            }
+        }
+    }
 
     async prepareFiles(language, code, testCases) {
         const langConfig = config.languages[language];
@@ -87,6 +139,21 @@ class Runner {
             // 確認檔案已寫入
             const files = await fs.readdir(executionDir);
             console.log(`[Runner] Created files in ${executionDir}:`, files);
+        } else if (language === 'java') {
+            const solutionPath = path.join(executionDir, 'Solution.java');
+            const testPath = path.join(executionDir, 'TestRunner.java');
+            console.log(`[Runner] Writing Java files to ${executionDir}`);
+            
+            await fs.writeFile(solutionPath, code);
+            const testContent = testTemplates[language].replace(
+                '{{TEST_CASES}}',
+                JSON.stringify(testCases)
+            );
+            await fs.writeFile(testPath, testContent);
+    
+            // 確認檔案已寫入
+            const files = await fs.readdir(executionDir);
+            console.log(`[Runner] Created files in ${executionDir}:`, files);
         }
     
         return executionDir;
@@ -94,11 +161,15 @@ class Runner {
 
     async createContainer(language, executionDir) {
         const langConfig = config.languages[language];
+
+        const cmd = language === 'java' 
+        ? [...langConfig.runCommand, 'TestRunner']  // Java 執行編譯後的 class 檔案
+        : [...langConfig.runCommand, `test${langConfig.fileExtension}`];
         
         console.log(`[Runner] Container configuration:`, {
             Image: langConfig.image,
             WorkingDir: '/code',
-            Cmd: [...langConfig.runCommand, `test${langConfig.fileExtension}`],
+            Cmd: cmd,
             HostConfig: {
                 Binds: [`${executionDir}:/code`],
                 Memory: langConfig.memoryLimit * 1024 * 1024,
@@ -109,7 +180,7 @@ class Runner {
         const container = await this.docker.createContainer({
             Image: langConfig.image,
             WorkingDir: '/code',
-            Cmd: [...langConfig.runCommand, `test${langConfig.fileExtension}`],
+            Cmd: cmd,
             HostConfig: {
                 Binds: [`${executionDir}:/code`],
                 Memory: langConfig.memoryLimit * 1024 * 1024,
